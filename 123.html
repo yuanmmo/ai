@@ -159,7 +159,9 @@
         grad.addColorStop(1, 'rgba(0,0,0,0)');
         ctx.fillStyle = grad;
         ctx.fillRect(0,0,32,32);
-        return new THREE.Texture(canvas);
+        const texture = new THREE.Texture(canvas);
+        texture.needsUpdate = true; // 修复：在这里设置needsUpdate
+        return texture;
     }
 
     // --- 3. 形状生成 (包含 Canvas 文字优化) ---
@@ -176,7 +178,6 @@
             shapeCache.text = getTextPoints("我是\n元默", CONFIG.particleCount);
             
             targetPositions = shapeCache.sphere;
-            generateSprite().needsUpdate = true; // 确保纹理上传
             
             // 形状生成完毕后，启动 MediaPipe
             initMediaPipe();
@@ -236,17 +237,19 @@
     }
 
     function getTextPoints(text, count) {
-        const size = 512; // 降低分辨率以加快移动端处理
+        const size = 256; // 进一步降低分辨率以加快移动端处理
         const cvs = document.createElement('canvas');
         cvs.width = size; cvs.height = size;
         const ctx = cvs.getContext('2d');
         ctx.fillStyle = '#000'; ctx.fillRect(0,0,size,size);
         ctx.fillStyle = '#fff'; 
-        ctx.font = 'bold 100px "Microsoft YaHei", sans-serif';
+        ctx.font = 'bold 80px "Microsoft YaHei", sans-serif';
         ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
         
         const lines = text.split('\n');
-        lines.forEach((l, i) => ctx.fillText(l, size/2, size/2 - 60 + i * 110));
+        const lineHeight = 90;
+        const totalHeight = (lines.length - 1) * lineHeight;
+        lines.forEach((l, i) => ctx.fillText(l, size/2, size/2 - totalHeight/2 + i * lineHeight));
         
         const data = ctx.getImageData(0,0,size,size).data;
         const pixels = [];
@@ -330,11 +333,6 @@
         particlesMesh.rotation.y += 0.002;
 
         renderer.render(scene, camera);
-
-        // 简单的 FPS 监测
-        if (Math.random() > 0.95) {
-            fpsEl.innerText = isMobile ? "Mobile Mode" : "PC Mode";
-        }
     }
 
     // --- 5. MediaPipe Hands (国内镜像版) ---
@@ -353,41 +351,155 @@
             hands.setOptions({
                 maxNumHands: 1,
                 modelComplexity: 1, // 0性能最好，1精度平衡
-                minDetectionConfidence: 0.5,
-                minTrackingConfidence: 0.5
+                minDetectionConfidence: 0.6,
+                minTrackingConfidence: 0.6
             });
 
-            hands.onResults(onResults);
+            // 修复：使用正确的API
+            hands.onResults((results) => {
+                onResults(results);
+            });
 
             const videoElement = document.getElementById('video-input');
-            const cameraUtils = new Camera(videoElement, {
+            
+            // 修复：使用新的Camera API
+            const camera = new Camera(videoElement, {
                 onFrame: async () => {
                     await hands.send({image: videoElement});
                 },
-                width: isMobile ? 480 : 640,  // 降低移动端视频分辨率以提高 AI 处理速度
-                height: isMobile ? 360 : 480
+                width: isMobile ? 320 : 640,  // 进一步降低分辨率
+                height: isMobile ? 240 : 480
             });
 
             statusEl.textContent = "请求摄像头权限...";
             
-            await cameraUtils.start();
-            statusEl.textContent = "系统就绪 - 请展示手势";
-            statusEl.style.color = "#00ff00";
-            statusEl.classList.remove('loading');
-            setTimeout(() => { 
-                document.getElementById('ui-layer').style.opacity = '0.7'; 
-                statusEl.parentElement.style.display = 'none';
-            }, 3000);
+            try {
+                await camera.start();
+                statusEl.textContent = "系统就绪 - 请展示手势";
+                statusEl.style.color = "#00ff00";
+                statusEl.classList.remove('loading');
+                setTimeout(() => { 
+                    document.getElementById('ui-layer').style.opacity = '0.7'; 
+                    statusEl.parentElement.style.display = 'none';
+                }, 3000);
+            } catch (camError) {
+                console.error("摄像头错误:", camError);
+                statusEl.textContent = "摄像头访问失败";
+                statusEl.style.color = "#ff0000";
+                
+                // 测试模式：使用鼠标模拟手势
+                initMouseMode();
+            }
 
         } catch (error) {
-            console.error(error);
-            statusEl.textContent = "启动失败: 请使用HTTPS或更换浏览器";
-            statusEl.style.color = "#ff0000";
-            alert("错误：无法启动摄像头。\n1. 请确保使用 HTTPS 协议。\n2. 微信内请点击右上角'在浏览器打开'。\n3. 请允许摄像头权限。");
+            console.error("MediaPipe错误:", error);
+            statusEl.textContent = "AI模型加载失败，使用鼠标模式";
+            statusEl.style.color = "#ff9900";
+            
+            // 降级到鼠标模式
+            initMouseMode();
         }
     }
 
-    // --- 6. 逻辑处理 ---
+    // 鼠标模拟模式（当摄像头不可用时）
+    function initMouseMode() {
+        statusEl.textContent = "鼠标模式: 移动鼠标控制粒子";
+        handLandmarks = {
+            9: { x: 0.5, y: 0.5, z: 0 },
+            0: { x: 0.5, y: 0.5, z: 0 }
+        };
+        
+        document.addEventListener('mousemove', (e) => {
+            if (handLandmarks) {
+                handLandmarks[9].x = e.clientX / window.innerWidth;
+                handLandmarks[9].y = e.clientY / window.innerHeight;
+                handLandmarks[0].x = e.clientX / window.innerWidth;
+                handLandmarks[0].y = e.clientY / window.innerHeight;
+            }
+        });
+        
+        // 键盘控制形状切换
+        document.addEventListener('keydown', (e) => {
+            const shapes = ['sphere', 'torus', 'star', 'heart', 'text'];
+            const shapeKeys = ['1', '2', '3', '4', '5'];
+            const index = shapeKeys.indexOf(e.key);
+            if (index !== -1 && shapeCache[shapes[index]]) {
+                currentShape = shapes[index];
+                targetPositions = shapeCache[shapes[index]];
+                isExploding = true;
+            }
+        });
+        
+        // 显示键盘提示
+        const instruction = document.querySelector('.instruction');
+        if (instruction) {
+            instruction.innerHTML = "键盘控制: 1=球 2=环 3=星 4=心 5=字<br>移动鼠标模拟手势";
+        }
+    }
+
+    // --- 6. 手势检测逻辑（修复版）---
+    function detectGesture(lm) {
+        // 改进的手势判定
+        const isFingerExtended = (tip, pip, mcp) => {
+            // 检查指尖是否比指关节更远离手腕
+            const dTip = Math.sqrt(
+                Math.pow(lm[tip].x - lm[0].x, 2) +
+                Math.pow(lm[tip].y - lm[0].y, 2) +
+                Math.pow(lm[tip].z - lm[0].z, 2)
+            );
+            const dPip = Math.sqrt(
+                Math.pow(lm[pip].x - lm[0].x, 2) +
+                Math.pow(lm[pip].y - lm[0].y, 2) +
+                Math.pow(lm[pip].z - lm[0].z, 2)
+            );
+            return dTip > dPip * 1.15; // 增加容差
+        };
+
+        // 各手指状态
+        const thumbUp = lm[4].y < lm[3].y; // 拇指向上（Y轴向下）
+        const indexUp = isFingerExtended(8, 6, 5);
+        const middleUp = isFingerExtended(12, 10, 9);
+        const ringUp = isFingerExtended(16, 14, 13);
+        const pinkyUp = isFingerExtended(20, 18, 17);
+
+        const fingerStates = [indexUp, middleUp, ringUp, pinkyUp];
+        const extendedCount = fingerStates.filter(Boolean).length;
+
+        let newShape = 'sphere';
+        
+        // 手势判定逻辑
+        if (extendedCount === 0) {
+            // 没有手指伸直
+            if (thumbUp) {
+                newShape = 'heart'; // 只有拇指竖起 = 心
+            } else {
+                newShape = 'torus'; // 握拳 = 环
+            }
+        } else if (extendedCount === 1) {
+            // 只有一根手指伸直
+            if (indexUp && !middleUp && !ringUp && !pinkyUp) {
+                newShape = 'star'; // 食指 = 星
+            } else if (thumbUp && !indexUp && !middleUp && !ringUp && !pinkyUp) {
+                newShape = 'heart'; // 只有拇指 = 心
+            }
+        } else if (extendedCount === 2) {
+            // 两根手指伸直
+            if (indexUp && middleUp && !ringUp && !pinkyUp) {
+                newShape = 'text'; // 剪刀手 = 字
+            }
+        } else if (extendedCount === 4) {
+            // 四指伸直 = 球
+            newShape = 'sphere';
+        }
+
+        // 如果检测到新手势，切换形状
+        if (newShape !== currentShape && shapeCache[newShape]) {
+            currentShape = newShape;
+            targetPositions = shapeCache[newShape];
+            isExploding = true;
+        }
+    }
+
     function onResults(results) {
         if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
             handLandmarks = results.multiHandLandmarks[0];
@@ -414,52 +526,13 @@
         }
     }
 
-    function detectGesture(lm) {
-        // 简易手势判定
-        const isFingerUp = (tip, pip) => {
-            // Y轴在 MediaPipe 是向下的，但我们主要看相对距离
-            // 用欧氏距离判断伸直：指尖离手腕 比 关节离手腕 远
-            const dTip = Math.hypot(lm[tip].x - lm[0].x, lm[tip].y - lm[0].y);
-            const dPip = Math.hypot(lm[pip].x - lm[0].x, lm[pip].y - lm[0].y);
-            return dTip > dPip * 1.1; // 1.1 容差
-        };
-
-        const thumb = isFingerUp(4, 2);
-        const index = isFingerUp(8, 6);
-        const mid   = isFingerUp(12, 10);
-        const ring  = isFingerUp(16, 14);
-        const pinky = isFingerUp(20, 18);
-
-        let d = 'sphere';
-        // 逻辑修正：确保手势互斥
-        const count = [index, mid, ring, pinky].filter(Boolean).length;
-
-        if (count === 0) {
-            if(thumb) d = 'heart';
-            else d = 'torus';
-        } else if (index && mid && !ring && !pinky) {
-            d = 'text';
-        } else if (index && !mid && !ring && !pinky) {
-            d = 'star';
-        } else if (count === 4) {
-            d = 'sphere';
-        }
-
-        if (d !== currentShape) {
-            currentShape = d;
-            if (shapeCache[d]) {
-                targetPositions = shapeCache[d];
-                isExploding = true;
-            }
-        }
-    }
-
     function onWindowResize() {
         camera.aspect = window.innerWidth / window.innerHeight;
         camera.updateProjectionMatrix();
         renderer.setSize(window.innerWidth, window.innerHeight);
     }
 
+    // --- 启动应用 ---
     initThree();
     animate();
 
